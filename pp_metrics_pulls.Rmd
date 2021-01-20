@@ -1,0 +1,768 @@
+---
+title: "pp_metrics_pull"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# loading required libraries
+library(tidyverse)
+library(osfr)
+library(reticulate)
+library(jsonlite)
+library(lubridate)
+library(here)
+
+Sys.setenv(TZ='UTC')
+
+url <- 'https://api.osf.io/_/metrics/preprints/'
+osf_auth <- Sys.getenv("osf_preprintimpact_auth")
+auth_header <- httr::add_headers('Authorization' = paste('Bearer', osf_auth))
+
+use_condaenv(condaenv = "myenv", conda = "/Users/courtneysoderberg/opt/anaconda3/bin/python")
+```
+
+```{r initial pull tables}
+# create tibble with all pps
+complete_preprint_pull_dates <- read_csv(here::here('/pp_pull_complete_data.csv')) %>%
+                                    rename(gte = date_published) %>%
+                                    mutate(lt = nine_weeks,
+                                           lt_string = gsub(" ", "T", lt),
+                                           gte_string = gsub(" ", "T", gte))
+
+partial_preprint_pull_dates <- read_csv(here::here('pp_pull_partial_data.csv')) %>%
+                                    rename(gte = date_published) %>%
+                                    mutate(lt_string = '2020-12-08T00:00:00',
+                                           gte_string = gsub(" ", "T", gte))
+```
+
+```{python complete downloads pull}
+pp = r.complete_preprint_pull_dates #get pandas df of R object
+
+import requests
+import pandas as pd
+import time
+
+METRICS_BASE = r.url
+TOKEN = r.osf_auth
+
+headers = {
+    'Content-Type': 'application/vnd.api+json',
+    'Authorization': 'Bearer {}'.format(TOKEN)
+}
+
+post_url = '{}downloads/'.format(METRICS_BASE)
+
+# set up empty dataframe with the right column names
+downloads_df = pd.DataFrame(columns=['guid', 'date', 'download_count'])
+empty_lists = 0
+calls = 1
+
+# loop through all the guids that need to be called that day
+for i in range(len(pp.guid)):
+
+  # get guid, and start and end days to use in query for each preprint
+  lte_date = pp['lt_string'][i]
+  gte_date = pp['gte_string'][i]
+  guid = pp['guid'][i]
+  
+  # set up query for getting views per preprint per user_id in timeframe
+  query = {
+      "query": {
+           "term" : { "preprint_id" : guid } # example pp guid
+      },
+       "aggs" : {
+          "downloads_timeframe": {
+              "filter": {
+                  "range" : {
+                      "timestamp" : {
+                          "gte" : gte_date,
+                          "lte" : lte_date
+                      }
+                  }
+              },
+                      "aggs": {
+                        "downloads_per_day" : {
+                          "date_histogram" :{
+                            "field":"timestamp",
+                            "interval":"day",
+                            "format": "yyyy-MM-dd HH:mm:ss"
+                          }
+                        }
+                      }
+                  }
+              }
+          }
+  
+  payload = {
+      'data': {
+          'type': 'preprint_metrics',
+          'attributes': {
+              'query': query
+          }
+      }
+  }
+  
+  # make call using query & payload from above
+  res = requests.post(post_url, headers=headers, json=payload)
+  pp_downloads = res.json()['aggregations']['downloads_timeframe']['downloads_per_day']['buckets']
+
+  calls = calls + 1
+  
+  if calls % 100 == 0:
+    time.sleep(1)
+  
+  else:
+  
+    if len(pp_downloads) > 0: # only parse query output if there were actually views/downloads to parse
+      
+     # loop through each person in output
+      for x in range(len(pp_downloads)):
+      
+      
+        new_row = [{'guid': guid, 'date':pp_downloads[x]['key_as_string'], 'download_count':pp_downloads[x]['doc_count']}]
+        
+        downloads_df = downloads_df.append(new_row, ignore_index = True)
+  
+    else:
+      empty_lists = empty_lists + 1
+```
+
+
+```{r complete downloads}
+
+downloads_df <- py$downloads_df
+downloads_df <- downloads_df %>%
+                  as_tibble() %>%
+                  unnest(download_count)
+
+write_csv(downloads_df, 'complete_downloads_df.csv')
+
+```
+
+
+
+```{python complete views pull}
+pp = r.complete_preprint_pull_dates #get pandas df of R object
+
+import requests
+import pandas as pd
+import time
+
+METRICS_BASE = r.url
+TOKEN = r.osf_auth
+
+headers = {
+    'Content-Type': 'application/vnd.api+json',
+    'Authorization': 'Bearer {}'.format(TOKEN)
+}
+
+post_url = '{}views/'.format(METRICS_BASE)
+
+# set up empty dataframe with the right column names
+views_df = pd.DataFrame(columns=['guid', 'date', 'view_count'])
+empty_lists = 0
+calls = 1
+
+# loop through all the guids that need to be called that day
+for i in range(len(pp.guid)):
+
+  # get guid, and start and end days to use in query for each preprint
+  lte_date = pp['lt_string'][i]
+  gte_date = pp['gte_string'][i]
+  guid = pp['guid'][i]
+  
+  # set up query for getting views per preprint per user_id in timeframe
+  query = {
+      "query": {
+           "term" : { "preprint_id" : guid } # example pp guid
+      },
+       "aggs" : {
+          "views_timeframe": {
+              "filter": {
+                  "range" : {
+                      "timestamp" : {
+                          "gte" : gte_date,
+                          "lte" : lte_date
+                      }
+                  }
+              },
+                      "aggs": {
+                        "views_per_day" : {
+                          "date_histogram" :{
+                            "field":"timestamp",
+                            "interval":"day",
+                            "format": "yyyy-MM-dd HH:mm:ss"
+                          }
+                        }
+                      }
+                  }
+              }
+          }
+  
+  payload = {
+      'data': {
+          'type': 'preprint_metrics',
+          'attributes': {
+              'query': query
+          }
+      }
+  }
+  
+  # make call using query & payload from above
+  res = requests.post(post_url, headers=headers, json=payload)
+  pp_views = res.json()['aggregations']['views_timeframe']['views_per_day']['buckets']
+
+  calls = calls + 1
+  
+  if calls % 100 == 0:
+    time.sleep(1)
+  
+  else:
+  
+    if len(pp_views) > 0: # only parse query output if there were actually views/downloads to parse
+      
+     # loop through each person in output
+      for x in range(len(pp_views)):
+      
+      
+        new_row = [{'guid': guid, 'date':pp_views[x]['key_as_string'], 'view_count':pp_views[x]['doc_count']}]
+        
+        views_df = views_df.append(new_row, ignore_index = True)
+  
+    else:
+      empty_lists = empty_lists + 1
+```
+
+```{r complete views}
+
+views_df <- py$views_df
+views_df <- views_df %>%
+                  as_tibble() %>%
+                  unnest(view_count)
+
+write_csv(views_df, 'complete_views_df.csv')
+
+```
+
+
+```{python partial downloads pull}
+partial_pp = r.partial_preprint_pull_dates #get pandas df of R object
+
+import requests
+import pandas as pd
+import time
+
+METRICS_BASE = r.url
+TOKEN = r.osf_auth
+
+headers = {
+    'Content-Type': 'application/vnd.api+json',
+    'Authorization': 'Bearer {}'.format(TOKEN)
+}
+
+post_url = '{}downloads/'.format(METRICS_BASE)
+
+# set up empty dataframe with the right column names
+partial_downloads_df = pd.DataFrame(columns=['guid', 'date', 'download_count'])
+empty_lists = 0
+calls = 1
+
+# loop through all the guids that need to be called that day
+for i in range(len(partial_pp.guid)):
+
+  # get guid, and start and end days to use in query for each preprint
+  lte_date = partial_pp['lt_string'][i]
+  gte_date = partial_pp['gte_string'][i]
+  guid = partial_pp['guid'][i]
+  
+  # set up query for getting views per preprint per user_id in timeframe
+  query = {
+      "query": {
+           "term" : { "preprint_id" : guid } # example pp guid
+      },
+       "aggs" : {
+          "downloads_timeframe": {
+              "filter": {
+                  "range" : {
+                      "timestamp" : {
+                          "gte" : gte_date,
+                          "lte" : lte_date
+                      }
+                  }
+              },
+                      "aggs": {
+                        "downloads_per_day" : {
+                          "date_histogram" :{
+                            "field":"timestamp",
+                            "interval":"day",
+                            "format": "yyyy-MM-dd HH:mm:ss"
+                          }
+                        }
+                      }
+                  }
+              }
+          }
+  
+  payload = {
+      'data': {
+          'type': 'preprint_metrics',
+          'attributes': {
+              'query': query
+          }
+      }
+  }
+  
+  # make call using query & payload from above
+  res = requests.post(post_url, headers=headers, json=payload)
+  partial_pp_downloads = res.json()['aggregations']['downloads_timeframe']['downloads_per_day']['buckets']
+
+  calls = calls + 1
+  
+  if calls % 100 == 0:
+    time.sleep(1)
+  
+  else:
+  
+    if len(partial_pp_downloads) > 0: # only parse query output if there were actually views/downloads to parse
+      
+     # loop through each person in output
+      for x in range(len(partial_pp_downloads)):
+      
+      
+        new_row = [{'guid': guid, 'date':partial_pp_downloads[x]['key_as_string'], 'download_count':partial_pp_downloads[x]['doc_count']}]
+        
+        partial_downloads_df = partial_downloads_df.append(new_row, ignore_index = True)
+  
+    else:
+      empty_lists = empty_lists + 1
+```
+
+```{r partial downloads}
+
+partial_downloads_df <- py$partial_downloads_df
+partial_downloads_df <- partial_downloads_df %>%
+                  as_tibble() %>%
+                  unnest(download_count)
+
+write_csv(partial_downloads_df, 'partial_downloads_df.csv')
+
+```
+
+
+```{python partial views pull}
+partial_pp = r.partial_preprint_pull_dates #get pandas df of R object
+
+import requests
+import pandas as pd
+import time
+
+METRICS_BASE = r.url
+TOKEN = r.osf_auth
+
+headers = {
+    'Content-Type': 'application/vnd.api+json',
+    'Authorization': 'Bearer {}'.format(TOKEN)
+}
+
+post_url = '{}views/'.format(METRICS_BASE)
+
+# set up empty dataframe with the right column names
+partial_views_df = pd.DataFrame(columns=['guid', 'date', 'view_count'])
+empty_lists = 0
+calls = 1
+
+# loop through all the guids that need to be called that day
+for i in range(len(partial_pp.guid)):
+
+  # get guid, and start and end days to use in query for each preprint
+  lte_date = partial_pp['lt_string'][i]
+  gte_date = partial_pp['gte_string'][i]
+  guid = partial_pp['guid'][i]
+  
+  # set up query for getting views per preprint per user_id in timeframe
+  query = {
+      "query": {
+           "term" : { "preprint_id" : guid } # example pp guid
+      },
+       "aggs" : {
+          "views_timeframe": {
+              "filter": {
+                  "range" : {
+                      "timestamp" : {
+                          "gte" : gte_date,
+                          "lte" : lte_date
+                      }
+                  }
+              },
+                      "aggs": {
+                        "views_per_day" : {
+                          "date_histogram" :{
+                            "field":"timestamp",
+                            "interval":"day",
+                            "format": "yyyy-MM-dd HH:mm:ss"
+                          }
+                        }
+                      }
+                  }
+              }
+          }
+  
+  payload = {
+      'data': {
+          'type': 'preprint_metrics',
+          'attributes': {
+              'query': query
+          }
+      }
+  }
+  
+  # make call using query & payload from above
+  res = requests.post(post_url, headers=headers, json=payload)
+  partial_pp_views = res.json()['aggregations']['views_timeframe']['views_per_day']['buckets']
+
+  calls = calls + 1
+  
+  if calls % 100 == 0:
+    time.sleep(1)
+  
+  else:
+  
+    if len(partial_pp_views) > 0: # only parse query output if there were actually views/downloads to parse
+      
+     # loop through each person in output
+      for x in range(len(partial_pp_views)):
+      
+      
+        new_row = [{'guid': guid, 'date':partial_pp_views[x]['key_as_string'], 'view_count':partial_pp_views[x]['doc_count']}]
+        
+        partial_views_df = partial_views_df.append(new_row, ignore_index = True)
+  
+    else:
+      empty_lists = empty_lists + 1
+```
+
+```{r partial views}
+
+partial_views_df <- py$partial_views_df
+partial_views_df <- partial_views_df %>%
+                  as_tibble() %>%
+                  unnest(view_count)
+
+write_csv(partial_views_df, 'partial_views_df.csv')
+
+```
+
+```{python only sloan_id views pull}
+
+import requests
+import pandas as pd
+import time
+
+METRICS_BASE = r.url
+TOKEN = r.osf_auth
+
+headers = {
+    'Content-Type': 'application/vnd.api+json',
+    'Authorization': 'Bearer {}'.format(TOKEN)
+}
+
+post_url = '{}views/'.format(METRICS_BASE)
+
+# set up empty dataframe with the right column names
+sloanid_pp_views_df = pd.DataFrame(columns=['guid', 'view_count'])
+
+# set up query for getting views per preprint per user_id in timeframe
+query = {
+    "query": {
+         "exists" : { "field" : "sloan_id" }
+    },
+     "aggs" : {
+        "pp_views": {
+            "filter": {
+                "range" : {
+                    "timestamp" : {
+                        "gte" : "2020-08-10",
+                        "lt" : "2020-12-18"
+                    }
+                }
+            },
+            "aggs": {
+                "guid" : {
+                    "terms" : {
+                        "field" : "preprint_id",
+                        "size" : 100000
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+payload = {
+    'data': {
+        'type': 'preprint_metrics',
+        'attributes': {
+            'query': query
+        }
+    }
+}
+
+res = requests.post(post_url, headers=headers, json=payload)
+sloanid_preprint_views = res.json()['aggregations']['pp_views']['guid']['buckets']
+
+for x in range(len(sloanid_preprint_views)):
+      
+  new_row = [{'guid': sloanid_preprint_views[x]['key'], 'view_count': sloanid_preprint_views[x]['doc_count']}]
+  
+  sloanid_pp_views_df = sloanid_pp_views_df.append(new_row, ignore_index = True)
+
+  
+```
+
+```{r only sloan_id views}
+sloanid_pp_views_df <- py$sloanid_pp_views_df
+sloanid_pp_views_df <- sloanid_pp_views_df %>%
+                  as_tibble() %>%
+                  unnest(view_count)
+
+write_csv(sloanid_pp_views_df, 'sloanid_pp_views_df.csv')
+```
+
+
+```{python only sloan_id downloads pull}
+
+import requests
+import pandas as pd
+import time
+
+METRICS_BASE = r.url
+TOKEN = r.osf_auth
+
+headers = {
+    'Content-Type': 'application/vnd.api+json',
+    'Authorization': 'Bearer {}'.format(TOKEN)
+}
+
+post_url = '{}downloads/'.format(METRICS_BASE)
+
+# set up empty dataframe with the right column names
+sloanid_pp_downloads_df = pd.DataFrame(columns=['guid', 'download_count'])
+
+# set up query for getting views per preprint per user_id in timeframe
+query = {
+    "query": {
+         "exists" : { "field" : "sloan_id" }
+    },
+     "aggs" : {
+        "pp_downloads": {
+            "filter": {
+                "range" : {
+                    "timestamp" : {
+                        "gte" : "2020-08-10",
+                        "lt" : "2020-12-18"
+                    }
+                }
+            },
+            "aggs": {
+                "guid" : {
+                    "terms" : {
+                        "field" : "preprint_id",
+                        "size" : 100000
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+payload = {
+    'data': {
+        'type': 'preprint_metrics',
+        'attributes': {
+            'query': query
+        }
+    }
+}
+
+res = requests.post(post_url, headers=headers, json=payload)
+sloanid_preprint_downloads = res.json()['aggregations']['pp_downloads']['guid']['buckets']
+
+for x in range(len(sloanid_preprint_downloads)):
+      
+  new_row = [{'guid': sloanid_preprint_downloads[x]['key'], 'download_count': sloanid_preprint_downloads[x]['doc_count']}]
+  
+  sloanid_pp_downloads_df = sloanid_pp_downloads_df.append(new_row, ignore_index = True)
+
+  
+```
+
+```{r only sloan_id downloads}
+sloanid_pp_downloads_df <- py$sloanid_pp_downloads_df
+sloanid_pp_downloads_df <- sloanid_pp_downloads_df %>%
+                  as_tibble() %>%
+                  unnest(download_count)
+
+write_csv(sloanid_pp_downloads_df, 'sloanid_pp_downloads_df.csv')
+```
+
+
+
+
+
+
+```{python views pull end}
+
+import requests
+import pandas as pd
+import time
+
+METRICS_BASE = r.url
+TOKEN = r.osf_auth
+
+headers = {
+    'Content-Type': 'application/vnd.api+json',
+    'Authorization': 'Bearer {}'.format(TOKEN)
+}
+
+post_url = '{}views/'.format(METRICS_BASE)
+
+# set up empty dataframe with the right column names
+pp_views_end_df = pd.DataFrame(columns=['guid', 'view_count'])
+
+# set up query for getting views per preprint per user_id in timeframe
+query = {
+     "aggs" : {
+        "pp_views": {
+            "filter": {
+                "range" : {
+                    "timestamp" : {
+                        "gte" : "2020-08-10",
+                        "lt" : "2020-12-18"
+                    }
+                }
+            },
+            "aggs": {
+                "guid" : {
+                    "terms" : {
+                        "field" : "preprint_id",
+                        "size" : 100000
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+payload = {
+    'data': {
+        'type': 'preprint_metrics',
+        'attributes': {
+            'query': query
+        }
+    }
+}
+
+res = requests.post(post_url, headers=headers, json=payload)
+preprint_views_end = res.json()['aggregations']['pp_views']['guid']['buckets']
+
+for x in range(len(preprint_views_end)):
+      
+  new_row = [{'guid': preprint_views_end[x]['key'], 'view_count': preprint_views_end[x]['doc_count']}]
+  
+  pp_views_end_df = pp_views_end_df.append(new_row, ignore_index = True)
+
+  
+```
+
+```{r only sloan_id views}
+pp_views_end_df <- py$pp_views_end_df
+pp_views_end_df <- pp_views_end_df %>%
+                  as_tibble() %>%
+                  unnest(view_count)
+
+write_csv(pp_views_end_df, 'pp_views_end_df.csv')
+```
+
+
+```{python views pull end}
+
+import requests
+import pandas as pd
+import time
+
+METRICS_BASE = r.url
+TOKEN = r.osf_auth
+
+headers = {
+    'Content-Type': 'application/vnd.api+json',
+    'Authorization': 'Bearer {}'.format(TOKEN)
+}
+
+post_url = '{}downloads/'.format(METRICS_BASE)
+
+# set up empty dataframe with the right column names
+pp_downloads_end_df = pd.DataFrame(columns=['guid', 'download_count'])
+
+# set up query for getting views per preprint per user_id in timeframe
+query = {
+     "aggs" : {
+        "pp_downloads": {
+            "filter": {
+                "range" : {
+                    "timestamp" : {
+                        "gte" : "2020-08-10",
+                        "lt" : "2020-12-18"
+                    }
+                }
+            },
+            "aggs": {
+                "guid" : {
+                    "terms" : {
+                        "field" : "preprint_id",
+                        "size" : 100000
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+payload = {
+    'data': {
+        'type': 'preprint_metrics',
+        'attributes': {
+            'query': query
+        }
+    }
+}
+
+res = requests.post(post_url, headers=headers, json=payload)
+preprint_downloads_end = res.json()['aggregations']['pp_downloads']['guid']['buckets']
+
+for x in range(len(preprint_downloads_end)):
+      
+  new_row = [{'guid': preprint_downloads_end[x]['key'], 'download_count': preprint_downloads_end[x]['doc_count']}]
+  
+  pp_downloads_end_df = pp_downloads_end_df.append(new_row, ignore_index = True)
+
+  
+```
+
+```{r only sloan_id views}
+pp_downloads_end_df <- py$pp_downloads_end_df
+pp_downloads_end_df <- pp_downloads_end_df %>%
+                  as_tibble() %>%
+                  unnest(download_count)
+
+write_csv(pp_downloads_end_df, 'pp_downloads_end_df.csv')
+```
+
+
+
+
